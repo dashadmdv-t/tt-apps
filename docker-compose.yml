@@ -1,0 +1,111 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    container_name: payments_api
+    restart: unless-stopped
+    ports:
+      - "8013:80"
+    environment:
+      API_KEY: ${API_KEY:-123}
+      DB_URL: ${DB_URL:-postgresql+asyncpg://postgres:postgres@payments-db:5432/payments_service_db}
+      DB_URL_SYNC: ${DB_URL_SYNC:-postgresql://postgres:postgres@payments-db:5432/payments_service_db}
+      DB_ECHO: ${DB_ECHO:-false}
+      RABBIT_URL: ${RABBIT_URL:-amqp://guest:guest@rabbit-mq:5672/}
+    command: >
+      sh -c "
+      alembic -c src/alembic.ini upgrade head &&
+      uvicorn src.main:app --host 0.0.0.0 --port 80
+      "
+    depends_on:
+      payments-db:
+        condition: service_healthy
+      rabbit-mq:
+        condition: service_healthy
+    networks:
+      - payments-network
+
+  outbox-dispatcher:
+    build: .
+    container_name: payments_outbox_dispatcher
+    restart: unless-stopped
+    environment:
+      API_KEY: ${API_KEY:-123}
+      DB_URL: ${DB_URL:-postgresql+asyncpg://postgres:postgres@payments-db:5432/payments_service_db}
+      DB_URL_SYNC: ${DB_URL_SYNC:-postgresql://postgres:postgres@payments-db:5432/payments_service_db}
+      DB_ECHO: ${DB_ECHO:-false}
+      RABBIT_URL: ${RABBIT_URL:-amqp://guest:guest@rabbit-mq:5672/}
+    command: python -m src.workers.outbox_dispatcher
+    depends_on:
+      payments-db:
+        condition: service_healthy
+      rabbit-mq:
+        condition: service_healthy
+    networks:
+      - payments-network
+
+  consumer:
+    build: .
+    container_name: payments_consumer
+    restart: unless-stopped
+    environment:
+      API_KEY: ${API_KEY:-123}
+      DB_URL: ${DB_URL:-postgresql+asyncpg://postgres:postgres@payments-db:5432/payments_service_db}
+      DB_URL_SYNC: ${DB_URL_SYNC:-postgresql://postgres:postgres@payments-db:5432/payments_service_db}
+      DB_ECHO: ${DB_ECHO:-false}
+      RABBIT_URL: ${RABBIT_URL:-amqp://guest:guest@rabbit-mq:5672/}
+    command: python -m src.workers.payment_consumer
+    depends_on:
+      payments-db:
+        condition: service_healthy
+      rabbit-mq:
+        condition: service_healthy
+    networks:
+      - payments-network
+
+  payments-db:
+    image: postgres:16
+    container_name: payments_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-payments_service_db}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-payments_service_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - payments-network
+
+  rabbit-mq:
+    image: rabbitmq:3.13-management
+    container_name: rabbit_mq
+    restart: unless-stopped
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - payments-network
+
+volumes:
+  postgres_data:
+
+networks:
+  payments-network:
+    driver: bridge
